@@ -1,0 +1,18 @@
+name:        generic-hashcons
+version:     0.0.0
+maintainer:  Victor Miraldo <v.cacciarimiraldo@gmail.com>
+github:      VictorCMiraldo/generic-hashcons
+category:    Other
+
+dependencies:
+  - base >= 4.9 && < 5
+  - containers
+  - mtl
+  - cryptonite
+  - memory
+  - bytestring
+
+library:
+  source-dirs: src/
+  ghc-options: -Wall
+

@@ -1,0 +1,37 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.31.2.
+--
+-- see: https://github.com/sol/hpack
+--
+-- hash: c17f083972ed6696097fffb4dfb5939d88f51d5561c76f0c1991d210c78c3597
+
+name:           generic-holes
+version:        0.0.0
+category:       Other
+homepage:       https://github.com/VictorCMiraldo/generic-holes#readme
+bug-reports:    https://github.com/VictorCMiraldo/generic-holes/issues
+maintainer:     Victor Miraldo <v.cacciarimiraldo@gmail.com>
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/VictorCMiraldo/generic-holes
+
+library
+  exposed-modules:
+      GHC.Generic.Holes
+      GHC.Generic.Merkle
+  other-modules:
+      Paths_generic_holes
+  hs-source-dirs:
+      src/
+  ghc-options: -Wall
+  build-depends:
+      base >=4.9 && <5
+    , bytestring
+    , containers
+    , cryptonite
+    , memory
+    , mtl
+  default-language: Haskell2010
