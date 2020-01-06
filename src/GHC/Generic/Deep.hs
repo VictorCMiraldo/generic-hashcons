@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -18,6 +19,8 @@
 module GHC.Generics.Deep where
 
 import Data.Proxy
+import Data.Functor.Const
+import Control.Monad.Identity
 import GHC.Generics
 
 ----------------------------
@@ -35,20 +38,61 @@ type NotElem a as = IsElem a as ~ 'False
 -- rep and, for the atoms of rep that are not elems of
 -- the primitive types, some custom data dictated by a functor f.
 -- You know where this is going.
-data REP (prim :: [ * ]) f rep :: * -> * where
-  REPD1   :: (NotElem a prim)       => f a -> REP prim f (K1 R a) x
-  REPK1   :: (Elem a prim , Show a) => a   -> REP prim f (K1 R a) x
-  REPU1   :: REP prim f U1 x
-  REPM1   :: REP prim f a x -> REP prim f (M1 i c a) x
-  REPL1   :: REP prim f a x -> REP prim f (a :+: b) x
-  REPR1   :: REP prim f b x -> REP prim f (a :+: b) x 
-  REPPair :: REP prim f a x -> REP prim f b x -> REP prim f (a :*: b) x
-deriving instance (forall a . Show (f a)) => Show (REP prim f rep x)
+data REP (prim :: [ * ]) f (rep :: * -> *) :: * where
+  REPD1   :: (NotElem a prim)       => f a -> REP prim f (K1 R a) 
+  REPK1   :: (Elem a prim , Show a) => a   -> REP prim f (K1 R a)
+  REPU1   :: REP prim f U1
+  REPM1   :: REP prim f a -> REP prim f (M1 i c a)
+  REPL1   :: REP prim f a -> REP prim f (a :+: b) 
+  REPR1   :: REP prim f b -> REP prim f (a :+: b)  
+  REPPair :: REP prim f a -> REP prim f b -> REP prim f (a :*: b) 
+deriving instance (forall a . Show (f a)) => Show (REP prim f rep)
 
 -- This is where this is going! :D
-data Fix prim a :: * where
-  Fix :: (Generic a) => { unFix :: REP prim (Fix prim) (Rep a) x } -> Fix prim a
-deriving instance Show (Fix prim a)
+data FixAnn prim ann a :: * where
+  FixAnn :: (Generic a)
+         => { getAnn :: ann a 
+            , unFix  :: REP prim (FixAnn prim ann) (Rep a)
+            }
+         -> FixAnn prim ann a
+deriving instance (forall a . Show (ann a)) => Show (FixAnn prim ann x)
+
+type Fix prim = FixAnn prim (Const ())
+
+--------------------------------------
+
+mapRepM :: (Monad m)
+        => (forall y . f y -> m (g y))
+        -> REP prim f rep -> m (REP prim g rep)
+mapRepM _f (REPK1 x) = return (REPK1 x)
+mapRepM _f (REPU1)   = return REPU1
+mapRepM f (REPD1 x)  = REPD1 <$> f x
+mapRepM f (REPM1 x)  = REPM1 <$> mapRepM f x
+mapRepM f (REPL1 x)  = REPL1 <$> mapRepM f x
+mapRepM f (REPR1 x)  = REPR1 <$> mapRepM f x
+mapRepM f (REPPair x y)
+  = REPPair <$> mapRepM f x <*> mapRepM f y
+
+mapRep :: (forall y . f y -> g y)
+       -> REP prim f rep -> REP prim g rep
+mapRep f = runIdentity . mapRepM (return . f)
+        
+cataM :: (Monad m)
+      => (forall b x . Generic b
+            => ann b -> REP prim phi (Rep b) -> m (phi b))
+      -> FixAnn prim ann a
+      -> m (phi a)
+cataM f (FixAnn ann x) = mapRepM (cataM f) x >>= f ann
+
+synthesizeM :: (Monad m)
+            => (forall b x . Generic b
+                => ann b -> REP prim phi (Rep b) -> m (phi b))
+            -> FixAnn prim ann a
+            -> m (FixAnn prim phi a)
+synthesizeM f = cataM (\ann r -> flip FixAnn r <$> f ann (mapRep getAnn r))
+
+--------------------------------------
+
 
 -- Converting values to deep representations is easy and follows
 -- almost the usual convention; one top level class
@@ -57,26 +101,26 @@ deriving instance Show (Fix prim a)
 class (Generic a) => Deep prim a where
   dfrom :: a -> Fix prim a
   default dfrom :: (GDeep prim (Rep a)) => a -> Fix prim a
-  dfrom = Fix . gdfrom . from
+  dfrom = FixAnn (Const ()) . gdfrom . from
   
   dto :: Fix prim a -> a
   default dto :: (GDeep prim (Rep a)) => Fix prim a -> a
-  dto (Fix x) = to . gdto $ x
+  dto (FixAnn _ x) = to . gdto $ x
 
 -- Typesyn to make life easier
 type FIX prim = REP prim (Fix prim)
 
 -- Your usual suspect; the GDeep typeclass
 class GDeep prim f where
-  gdfrom :: f x -> FIX prim f x
-  gdto   :: FIX prim f x -> f x
+  gdfrom :: f x -> FIX prim f
+  gdto   :: FIX prim f -> f x
 
 -- And the class that disambiguates primitive types
 -- from types in the family. This is completely hidden from
 -- the user though
 class GDeepAtom prim (isPrim :: Bool) a where
-  gdfromAtom  :: Proxy isPrim -> a -> FIX prim (K1 R a) x
-  gdtoAtom    :: Proxy isPrim -> FIX prim (K1 R a) x -> a
+  gdfromAtom  :: Proxy isPrim -> a -> FIX prim (K1 R a)
+  gdtoAtom    :: Proxy isPrim -> FIX prim (K1 R a) -> a
 
 instance (NotElem a prim , Deep prim a) => GDeepAtom prim 'False a where
   gdfromAtom _ a = REPD1 (dfrom a)
@@ -148,3 +192,24 @@ pyth = Let [Decl "hypSq" (Add (Pow (Var "x") (Lit 2)) (Pow (Var "y") (Lit 2)))]
 
 dfromPrim :: (Deep Prims a) => a -> Fix Prims a
 dfromPrim = dfrom
+
+---------------------------------------
+-- Awesome; now, onto things I need: --
+---------------------------------------
+
+
+-- * Hash Cons: works; we can do synthesize; see above
+
+
+-- * Unification and Anti Unification
+
+
+data ((f :: (* -> *) -> *) :**: (g :: (* -> *) -> *)) rep
+  = f rep :**: g rep
+
+data Down (f :: (* -> *) -> *) x = Down (f (K1 R x))
+
+antiunif :: (NotElem x prim)
+         => REP prim f (K1 R x) -> REP prim g (K1 R x)
+         -> REP prim (Down (REP prim f :**: REP prim g)) (K1 R x)
+antiunif r s = REPD1 (Down (r :**: s))
