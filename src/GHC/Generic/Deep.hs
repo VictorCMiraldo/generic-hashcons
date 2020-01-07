@@ -19,6 +19,7 @@ module GHC.Generics.Deep where
 
 import Data.Proxy
 import GHC.Generics
+import Control.Monad.Identity
 
 ----------------------------
 -- The Monster
@@ -46,6 +47,28 @@ data SRep w f where
 --  S_ST   ::         c => SRep w f -> SRep w (c :=>: f)
 deriving instance (forall a. Show (w a)) => Show (SRep w f)
 
+-- Applies f to recursive positions only; Recursive here
+-- really is just 'NotElem prims'
+data OnRec prim f a where
+  Prim :: (Elem a prim , Show a)
+       => a -> OnRec prim f a
+  Rec  :: (NotElem a prim)
+       => f a -> OnRec prim f a
+
+-- Representation with primitive types
+type PrimRep prim w = SRep (OnRec prim w)
+
+-- Annotated fixpoints
+data SFixAnn prim ann a where
+  SFix :: (Generic a)
+       => { getAnn :: ann
+          , unFix  :: PrimRep prim (SFixAnn prim ann) (Rep a)
+          } 
+       -> SFixAnn prim ann a
+
+type SFix prim = SFixAnn prim ()
+       
+{-
 -- TODO: spli this type in two; Fix (WithPrim ...)
 data SFix prim a where
   Prim :: (Elem a prim , Show a)
@@ -54,6 +77,51 @@ data SFix prim a where
        => SRep (SFix prim) (Rep a)
        -> SFix prim a
 deriving instance Show (SFix prim a)
+-}
+
+---------------------------------
+
+mapRepM :: (Monad m)
+        => (forall y . f y -> m (g y))
+        -> SRep f rep -> m (SRep g rep)
+mapRepM _f (S_U1)   = return S_U1
+mapRepM f (S_K1 x)  = S_K1 <$> f x
+mapRepM f (S_M1 x)  = S_M1 <$> mapRepM f x
+mapRepM f (S_L1 x)  = S_L1 <$> mapRepM f x
+mapRepM f (S_R1 x)  = S_R1 <$> mapRepM f x
+mapRepM f (x :**: y)
+  = (:**:) <$> mapRepM f x <*> mapRepM f y
+
+mapRep :: (forall y . f y -> g y)
+       -> SRep f rep -> SRep g rep
+mapRep f = runIdentity . mapRepM (return . f)
+
+mapOnRecM :: (Monad m)
+          => (forall y . f y -> m (g y))
+          -> OnRec prim f a -> m (OnRec prim g a)
+mapOnRecM f  (Rec  x) = Rec <$> f x
+mapOnRecM _f (Prim x) = return (Prim x)
+
+        
+{-
+cataM :: (Monad m)
+      => (forall b x . Generic b
+            => ann b -> SRep prim phi (Rep b) -> m (phi b))
+      -> FixAnn prim ann a
+      -> m (phi a)
+cataM f (FixAnn ann x) = mapRepM (cataM f) x >>= f ann
+
+synthesizeM :: (Monad m)
+            => (forall b x . Generic b
+                => ann b -> SRep prim phi (Rep b) -> m (phi b))
+            -> FixAnn prim ann a
+            -> m (FixAnn prim phi a)
+synthesizeM f = cataM (\ann r -> flip FixAnn r <$> f ann (mapRep getAnn r))
+-}
+
+
+----------------------------------
+
 
 data ElemPrf a as where
   EP_Yes :: Elem a as    => ElemPrf a as
@@ -78,35 +146,32 @@ instance {-# OVERLAPPABLE #-}
 -- special treatment on atoms.
 class (Generic a) => Deep prim a where
   dfrom :: a -> SFix prim a
-  default dfrom :: (Show a , DecideElem a prim , GDeep prim (Rep a))
+  default dfrom :: (GDeep prim (Rep a))
                 => a -> SFix prim a
-  dfrom = case isElem :: ElemPrf a prim of
-            EP_No  -> SFix . gdfrom . from
-            EP_Yes -> Prim
+  dfrom = SFix () . gdfrom . from
   
   dto :: SFix prim a -> a
   default dto :: (GDeep prim (Rep a)) => SFix prim a -> a
-  dto (SFix x) = to . gdto $ x
-  dto (Prim a) = a
+  dto (SFix _ x) = to . gdto $ x
 
 -- Your usual suspect; the GDeep typeclass
 class GDeep prim f where
-  gdfrom :: f x -> SRep (SFix prim) f 
-  gdto   :: SRep (SFix prim) f -> f x 
+  gdfrom :: f x -> PrimRep prim (SFix prim) f 
+  gdto   :: PrimRep prim (SFix prim) f -> f x 
 
 -- And the class that disambiguates primitive types
 -- from types in the family. This is completely hidden from
 -- the user though
 class GDeepAtom prim (isPrim :: Bool) a where
-  gdfromAtom  :: Proxy isPrim -> a -> SFix prim a
-  gdtoAtom    :: Proxy isPrim -> SFix prim a -> a
+  gdfromAtom  :: Proxy isPrim -> a -> OnRec prim (SFix prim) a
+  gdtoAtom    :: Proxy isPrim -> OnRec prim (SFix prim) a -> a
 
 instance (NotElem a prim , Deep prim a) => GDeepAtom prim 'False a where
-  gdfromAtom _ a = dfrom a
-  gdtoAtom _   x = dto x
+  gdfromAtom _ a       = Rec . dfrom $ a
+  gdtoAtom _   (Rec x) = dto x
 
 instance (Elem a prim , Show a) => GDeepAtom prim 'True a where
-  gdfromAtom _ a = (Prim a)
+  gdfromAtom _ a = Prim a
   gdtoAtom   _ (Prim a) = a
 
 -- This ties the recursive knot
