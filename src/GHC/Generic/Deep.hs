@@ -18,6 +18,7 @@
 module GHC.Generics.Deep where
 
 import Data.Proxy
+import Data.Functor.Const
 import GHC.Generics
 import Control.Monad.Identity
 
@@ -67,6 +68,14 @@ data SFixAnn prim ann a where
        -> SFixAnn prim ann a
 
 type SFix prim = SFixAnn prim ()
+
+
+-- Free Monad
+data SFree prim h a where
+  SPure :: h a -> SFree prim h a
+  SRoll :: (Generic a)
+        => PrimRep prim (SFree prim h) (Rep a)
+        -> SFree prim h a
        
 {-
 -- TODO: spli this type in two; Fix (WithPrim ...)
@@ -236,3 +245,8 @@ pyth = Let [Decl "hypSq" (Add (Pow (Var "x") (Lit 2)) (Pow (Var "y") (Lit 2)))]
 
 dfromPrim :: (Deep Prims a) => a -> SFix Prims a
 dfromPrim = dfrom
+
+------------------
+-- Holes
+ 
+type Patch prims = SFree prims (SFix prims :*: SFix prims)
