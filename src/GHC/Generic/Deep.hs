@@ -51,7 +51,7 @@ deriving instance (forall a. Show (w a)) => Show (SRep w f)
 -- Applies f to recursive positions only; Recursive here
 -- really is just 'NotElem prims'
 data OnRec prim f a where
-  Prim :: (Elem a prim , Show a)
+  Prim :: (Elem a prim , Show a , Eq a)
        => a -> OnRec prim f a
   Rec  :: (NotElem a prim)
        => f a -> OnRec prim f a
@@ -179,7 +179,7 @@ instance (NotElem a prim , Deep prim a) => GDeepAtom prim 'False a where
   gdfromAtom _ a       = Rec . dfrom $ a
   gdtoAtom _   (Rec x) = dto x
 
-instance (Elem a prim , Show a) => GDeepAtom prim 'True a where
+instance (Elem a prim , Show a , Eq a) => GDeepAtom prim 'True a where
   gdfromAtom _ a = Prim a
   gdtoAtom   _ (Prim a) = a
 
@@ -248,5 +248,26 @@ dfromPrim = dfrom
 
 ------------------
 -- Holes
+
+    
+
+{-
+
+antiunif :: SFix prims a
+         -> SFix prims a
+         ->  (OnRec2 prim) (SFix prims :*: SFix prims) a
+antiunif x@(SFix _ rx) y@(SFix _ ry) =
+  case zipSRep rx ry of
+    Nothing -> SPure  (x :*: y)
+    Just r  -> SRollU (mapRep _ r)
  
-type Patch prims = SFree prims (SFix prims :*: SFix prims)
+zipSRep :: SRep w f -> SRep w f -> Maybe (SRep (w :*: w) f)
+zipSRep S_U1         S_U1         = return S_U1
+zipSRep (S_L1 x)     (S_L1 y)     = S_L1 <$> zipSRep x y
+zipSRep (S_R1 x)     (S_R1 y)     = S_R1 <$> zipSRep x y
+zipSRep (S_M1 x)     (S_M1 y)     = S_M1 <$> zipSRep x y
+zipSRep (x1 :**: x2) (y1 :**: y2) = (:**:) <$> (zipSRep x1 y1)
+                                           <*> (zipSRep x2 y2)
+zipSRep (S_K1 x)     (S_K1 y)     = return $ S_K1 (x :*: y)
+zipSRep x            y            = Nothing
+-}
