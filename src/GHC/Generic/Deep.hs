@@ -1,3 +1,4 @@
+{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -48,47 +49,98 @@ data SRep w f where
 --  S_ST   ::         c => SRep w f -> SRep w (c :=>: f)
 deriving instance (forall a. Show (w a)) => Show (SRep w f)
 
--- Applies f to recursive positions only; Recursive here
--- really is just 'NotElem prims'
+-- Now, lets do some magic! I'll be combining the
+-- free monad and the cofree comonad on the same type!
+-- I call these type HolesAnn
+data HolesAnn prim phi h a where
+  Hole' :: h a -> HolesAnn prim phi h a
+  Prim' :: (Elem a prim , Show a , Eq a)
+        => a -> HolesAnn prim phi h a
+  Roll' :: (NotElem a prim , Generic a)
+        => phi a
+        -> SRep (HolesAnn prim phi h) (Rep a)
+        -> HolesAnn prim phi h a
+deriving instance (forall a . Show (h a) , forall a . Show (phi a))
+  => Show (HolesAnn prim phi h x)
+
+-- Here are holes with no annotations:
+
+type Holes prim = HolesAnn prim U1
+
+pattern Hole :: h a -> Holes prim h a
+pattern Hole x = Hole' x
+
+pattern Prim :: () => (Elem a prim , Show a , Eq a)
+             => a -> Holes prim h a
+pattern Prim a = Prim' a
+
+pattern Roll :: () => (NotElem a prim , Generic a)
+             => SRep (Holes prim h) (Rep a)
+             -> Holes prim h a
+pattern Roll x = Roll' U1 x
+{-# COMPLETE Hole , Prim , Roll #-}
+
+-- Here are plain fixpoints (Holes with no annotations
+-- not holes)
+
+type SFix prim = Holes prim V1
+
+pattern SFix :: () => (NotElem a prim , Generic a)
+             => SRep (SFix prim) (Rep a)
+             -> SFix prim a
+pattern SFix x = Roll x
+{-# COMPLETE SFix , Prim #-}
+
+-- Here are annotated fixpoints (Holes with annotations
+-- but no holes)
+
+type SFixAnn prim phi = HolesAnn prim phi V1
+
+pattern PrimAnn :: () => (Elem a prim , Show a , Eq a)
+                => a -> SFixAnn prim phi a
+pattern PrimAnn a = Prim' a
+
+
+pattern SFixAnn :: () => (NotElem a prim , Generic a)
+                => phi a
+                -> SRep (SFixAnn prim phi) (Rep a)
+                -> SFixAnn prim phi a
+pattern SFixAnn ann x = Roll' ann x
+{-# COMPLETE SFixAnn , PrimAnn #-}
+
+---------------------------------
+
 data OnRec prim f a where
-  Prim :: (Elem a prim , Show a , Eq a)
+  NRec :: (Elem a prim , Show a , Eq a)
        => a -> OnRec prim f a
   Rec  :: (NotElem a prim)
        => f a -> OnRec prim f a
 
--- Representation with primitive types
-type PrimRep prim w = SRep (OnRec prim w)
+data WrapRep f a where
+  WrapRep :: (Generic a) => f (Rep a) -> WrapRep f a
 
--- Annotated fixpoints
-data SFixAnn prim ann a where
-  SFix :: (Generic a)
-       => { getAnn :: ann
-          , unFix  :: PrimRep prim (SFixAnn prim ann) (Rep a)
-          } 
-       -> SFixAnn prim ann a
-
-type SFix prim = SFixAnn prim ()
-
-
--- Free Monad
-data SFree prim h a where
-  SPure :: h a -> SFree prim h a
-  SRoll :: (Generic a)
-        => PrimRep prim (SFree prim h) (Rep a)
-        -> SFree prim h a
-       
-{-
--- TODO: spli this type in two; Fix (WithPrim ...)
-data SFix prim a where
-  Prim :: (Elem a prim , Show a)
-       => a -> SFix prim a
-  SFix :: (NotElem a prim , Generic a)
-       => SRep (SFix prim) (Rep a)
-       -> SFix prim a
-deriving instance Show (SFix prim a)
--}
+unfix :: SFixAnn prim phi a
+      -> OnRec prim (phi :*: WrapRep (SRep (SFixAnn prim phi))) a
+unfix (PrimAnn x)   = NRec x
+unfix (SFixAnn a h) = Rec (a :*: WrapRep h)
+      
+mapOnRecM :: (Monad m)
+          => (forall y . f y -> m (g y))
+          -> OnRec prim f a -> m (OnRec prim g a)
+mapOnRecM f  (Rec  x) = Rec <$> f x
+mapOnRecM _f (NRec x) = return (NRec x)
 
 ---------------------------------
+
+zipSRep :: SRep w f -> SRep w f -> Maybe (SRep (w :*: w) f)
+zipSRep S_U1         S_U1         = return S_U1
+zipSRep (S_L1 x)     (S_L1 y)     = S_L1 <$> zipSRep x y
+zipSRep (S_R1 x)     (S_R1 y)     = S_R1 <$> zipSRep x y
+zipSRep (S_M1 x)     (S_M1 y)     = S_M1 <$> zipSRep x y
+zipSRep (x1 :**: x2) (y1 :**: y2) = (:**:) <$> (zipSRep x1 y1)
+                                           <*> (zipSRep x2 y2)
+zipSRep (S_K1 x)     (S_K1 y)     = return $ S_K1 (x :*: y)
+zipSRep _            _            = Nothing
 
 mapRepM :: (Monad m)
         => (forall y . f y -> m (g y))
@@ -104,30 +156,48 @@ mapRepM f (x :**: y)
 mapRep :: (forall y . f y -> g y)
        -> SRep f rep -> SRep g rep
 mapRep f = runIdentity . mapRepM (return . f)
-
-mapOnRecM :: (Monad m)
-          => (forall y . f y -> m (g y))
-          -> OnRec prim f a -> m (OnRec prim g a)
-mapOnRecM f  (Rec  x) = Rec <$> f x
-mapOnRecM _f (Prim x) = return (Prim x)
-
         
 {-
-cataM :: (Monad m)
-      => (forall b x . Generic b
-            => ann b -> SRep prim phi (Rep b) -> m (phi b))
-      -> FixAnn prim ann a
-      -> m (phi a)
-cataM f (FixAnn ann x) = mapRepM (cataM f) x >>= f ann
+option:
 
-synthesizeM :: (Monad m)
-            => (forall b x . Generic b
-                => ann b -> SRep prim phi (Rep b) -> m (phi b))
-            -> FixAnn prim ann a
-            -> m (FixAnn prim phi a)
-synthesizeM f = cataM (\ann r -> flip FixAnn r <$> f ann (mapRep getAnn r))
+cataM :: (Monad m)
+      => (forall b . (NotElem b prim , Generic b)
+            => ann b -> SRep (OnRec prim phi) (Rep b) -> m (phi b))
+      -> (forall b . (Elem b prim , Show b , Eq b)
+            => b -> m (phi b))
+      -> SFixAnn prim ann a
+      -> m (phi a)
+cataM f g (SFixAnn ann x) = mapRepM () x >>= f ann
+cataM _ g (PrimAnn x)     = g x
 -}
 
+cataM :: (Monad m)
+      => (forall b . (NotElem b prim , Generic b)
+            => ann b -> SRep phi (Rep b) -> m (phi b))
+      -> (forall b . (Elem b prim , Show b , Eq b)
+            => b -> m (phi b))
+      -> SFixAnn prim ann a
+      -> m (phi a)
+cataM f g (SFixAnn ann x) = mapRepM (cataM f g) x >>= f ann
+cataM _ g (PrimAnn x)     = g x
+
+getAnn :: (forall b . (Elem b prim , Show b , Eq b)
+            => b -> phi b)
+       -> SFixAnn prim phi a
+       -> phi a
+getAnn _   (SFixAnn ann _) = ann
+getAnn def (PrimAnn x)     = def x
+
+synthesizeM :: (Monad m)
+            => (forall b . Generic b
+                  => ann b -> SRep phi (Rep b) -> m (phi b))
+            -> (forall b . (Elem b prim , Show b , Eq b)
+                  => b -> phi b)
+            -> SFixAnn prim ann a
+            -> m (SFixAnn prim phi a)
+synthesizeM f def = cataM (\ann r -> flip SFixAnn r
+                             <$> f ann (mapRep (getAnn def) r))
+                        (return . PrimAnn)
 
 ----------------------------------
 
@@ -153,31 +223,31 @@ instance {-# OVERLAPPABLE #-}
 -- almost the usual convention; one top level class
 -- and one generic version. This time though, we need
 -- special treatment on atoms.
-class (Generic a) => Deep prim a where
+class (NotElem a prim , Generic a) => Deep prim a where
   dfrom :: a -> SFix prim a
   default dfrom :: (GDeep prim (Rep a))
                 => a -> SFix prim a
-  dfrom = SFix () . gdfrom . from
+  dfrom = SFix . gdfrom . from
   
   dto :: SFix prim a -> a
   default dto :: (GDeep prim (Rep a)) => SFix prim a -> a
-  dto (SFix _ x) = to . gdto $ x
+  dto (SFix x) = to . gdto $ x
 
 -- Your usual suspect; the GDeep typeclass
 class GDeep prim f where
-  gdfrom :: f x -> PrimRep prim (SFix prim) f 
-  gdto   :: PrimRep prim (SFix prim) f -> f x 
+  gdfrom :: f x -> SRep (SFix prim) f 
+  gdto   :: SRep (SFix prim) f -> f x 
 
 -- And the class that disambiguates primitive types
 -- from types in the family. This is completely hidden from
 -- the user though
 class GDeepAtom prim (isPrim :: Bool) a where
-  gdfromAtom  :: Proxy isPrim -> a -> OnRec prim (SFix prim) a
-  gdtoAtom    :: Proxy isPrim -> OnRec prim (SFix prim) a -> a
+  gdfromAtom  :: Proxy isPrim -> a -> SFix prim a
+  gdtoAtom    :: Proxy isPrim -> SFix prim a -> a
 
 instance (NotElem a prim , Deep prim a) => GDeepAtom prim 'False a where
-  gdfromAtom _ a       = Rec . dfrom $ a
-  gdtoAtom _   (Rec x) = dto x
+  gdfromAtom _ a = dfrom $ a
+  gdtoAtom _   x = dto x
 
 instance (Elem a prim , Show a , Eq a) => GDeepAtom prim 'True a where
   gdfromAtom _ a = Prim a
@@ -242,6 +312,9 @@ pyth :: Exp
 pyth = Let [Decl "hypSq" (Add (Pow (Var "x") (Lit 2)) (Pow (Var "y") (Lit 2)))]
            (Sqrt (Var "hypSq"))
 
+ex1 , ex2 :: Exp
+ex1 = (Add (Var "x") (Add (Lit 4) (Lit 2)))
+ex2 = (Add (Var "z") (Lit 42))
 
 dfromPrim :: (Deep Prims a) => a -> SFix Prims a
 dfromPrim = dfrom
@@ -249,25 +322,36 @@ dfromPrim = dfrom
 ------------------
 -- Holes
 
-    
-
-{-
-
-antiunif :: SFix prims a
-         -> SFix prims a
-         ->  (OnRec2 prim) (SFix prims :*: SFix prims) a
-antiunif x@(SFix _ rx) y@(SFix _ ry) =
+uncurry' :: (f x -> g x -> res) -> (f :*: g) x -> res
+uncurry' f (x :*: y) = f x y
+       
+-- anti unification
+au :: SFix prim a -> SFix prim a
+   -> Holes prim (SFix prim :*: SFix prim) a
+au (Prim x) (Prim y)
+ | x == y    = Prim x
+ | otherwise = Hole (Prim x :*: Prim y)
+au x@(SFix rx) y@(SFix ry) =
   case zipSRep rx ry of
-    Nothing -> SPure  (x :*: y)
-    Just r  -> SRollU (mapRep _ r)
- 
-zipSRep :: SRep w f -> SRep w f -> Maybe (SRep (w :*: w) f)
-zipSRep S_U1         S_U1         = return S_U1
-zipSRep (S_L1 x)     (S_L1 y)     = S_L1 <$> zipSRep x y
-zipSRep (S_R1 x)     (S_R1 y)     = S_R1 <$> zipSRep x y
-zipSRep (S_M1 x)     (S_M1 y)     = S_M1 <$> zipSRep x y
-zipSRep (x1 :**: x2) (y1 :**: y2) = (:**:) <$> (zipSRep x1 y1)
-                                           <*> (zipSRep x2 y2)
-zipSRep (S_K1 x)     (S_K1 y)     = return $ S_K1 (x :*: y)
-zipSRep x            y            = Nothing
--}
+    Nothing -> Hole (x :*: y)
+    Just r  -> Roll (mapRep (uncurry' au) r)
+
+
+------------------
+-- Annotate with height
+
+heights :: SFix prim a -> SFixAnn prim (Const Int) a
+heights = runIdentity . synthesizeM go (const (Const 0))
+  where
+    go :: U1 b -> SRep (Const Int) (Rep b) -> Identity (Const Int b)
+    go _ x = do
+      maxi <- alg x
+      return (Const (1 + maxi))
+    
+    alg :: SRep (Const Int) f -> Identity Int
+    alg S_U1 = return 0
+    alg (S_L1 x) = alg x
+    alg (S_R1 x) = alg x
+    alg (S_M1 x) = alg x
+    alg (x :**: y) = max <$> alg x <*> alg y
+    alg (S_K1 (Const x)) = return x
