@@ -117,18 +117,26 @@ data OnRec prim f a where
        => f a -> OnRec prim f a
 
 data WrapRep f a where
-  WrapRep :: (Generic a) => f (Rep a) -> WrapRep f a
+  WrapRep :: (Generic a) => {unwrapRep :: f (Rep a)} -> WrapRep f a
 
 unfix :: SFixAnn prim phi a
       -> OnRec prim (phi :*: WrapRep (SRep (SFixAnn prim phi))) a
 unfix (PrimAnn x)   = NRec x
 unfix (SFixAnn a h) = Rec (a :*: WrapRep h)
+
+refix :: OnRec prim (SFixAnn prim phi) a -> SFixAnn prim phi a
+refix (NRec x) = Prim' x
+refix (Rec x)  = x
       
 mapOnRecM :: (Monad m)
-          => (forall y . f y -> m (g y))
+          => (forall y . (NotElem y prim) => f y -> m (g y))
           -> OnRec prim f a -> m (OnRec prim g a)
 mapOnRecM f  (Rec  x) = Rec <$> f x
 mapOnRecM _f (NRec x) = return (NRec x)
+
+mapOnRec :: (forall y . (NotElem y prim) => f y -> g y)
+         -> OnRec prim f a -> OnRec prim g a
+mapOnRec f = runIdentity . mapOnRecM (return . f)
 
 ---------------------------------
 
@@ -157,20 +165,35 @@ mapRep :: (forall y . f y -> g y)
        -> SRep f rep -> SRep g rep
 mapRep f = runIdentity . mapRepM (return . f)
         
-{-
-option:
+-- Cata for recursive positions only; a little bit
+-- nastier in implementation but the type is nice
+cataRecM :: forall m a prim ann phi
+          . (Monad m , NotElem a prim)
+         => (forall b . (NotElem b prim , Generic b)
+               => ann b -> SRep (OnRec prim phi) (Rep b) -> m (phi b))
+         -> SFixAnn prim ann a
+         -> m (phi a)
+cataRecM f (SFixAnn ann x) =
+  mapRepM (mapOnRecM (uncurry' relayer) . unfix) x >>= f ann
+ where
+   relayer :: (NotElem x prim)
+           => ann x -> WrapRep (SRep (SFixAnn prim ann)) x -> m (phi x)
+   relayer ann' (WrapRep x') = cataRecM f (SFixAnn ann' x')
 
-cataM :: (Monad m)
-      => (forall b . (NotElem b prim , Generic b)
-            => ann b -> SRep (OnRec prim phi) (Rep b) -> m (phi b))
-      -> (forall b . (Elem b prim , Show b , Eq b)
-            => b -> m (phi b))
-      -> SFixAnn prim ann a
-      -> m (phi a)
-cataM f g (SFixAnn ann x) = mapRepM () x >>= f ann
-cataM _ g (PrimAnn x)     = g x
--}
+synthesizeRecM :: forall m a ann phi prim
+                . (Monad m , NotElem a prim)
+               => (forall b . Generic b
+                     => ann b -> SRep (OnRec prim phi) (Rep b) -> m (phi b))
+               -> SFixAnn prim ann a
+               -> m (SFixAnn prim phi a)
+synthesizeRecM f = cataRecM (\ann r -> flip SFixAnn (mapRep refix r)
+                               <$> f ann (mapRep (mapOnRec getRecAnn) r))
+  where
+    getRecAnn :: (NotElem y prim) => SFixAnn prim xsi y -> xsi y
+    getRecAnn (SFixAnn x _) = x
 
+-- Simpler cata; separate action injecting primitives
+-- into the annotation type.
 cataM :: (Monad m)
       => (forall b . (NotElem b prim , Generic b)
             => ann b -> SRep phi (Rep b) -> m (phi b))
@@ -355,3 +378,4 @@ heights = runIdentity . synthesizeM go (const (Const 0))
     alg (S_M1 x) = alg x
     alg (x :**: y) = max <$> alg x <*> alg y
     alg (S_K1 (Const x)) = return x
+
